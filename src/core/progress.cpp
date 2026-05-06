@@ -186,6 +186,8 @@ void progress_read(const net_status_t& net_status)
   internal_context_t* internal_ctx =
       static_cast<internal_context_t*>(net_status.user_context);
 
+  if (!internal_ctx) return;
+
   if (internal_ctx->is_extended) {
     // extended internal context
     internal_context_extended_t* ectx =

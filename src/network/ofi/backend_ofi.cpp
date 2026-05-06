@@ -80,10 +80,28 @@ ofi_net_context_impl_t::ofi_net_context_impl_t(runtime_t runtime_, attr_t attr_)
   // hints->ep_attr->protocol = FI_PROTO_CXI_RNR;
   hints->domain_attr->mr_mode = FI_MR_VIRT_ADDR | FI_MR_ALLOCATED |
                                 FI_MR_PROV_KEY | FI_MR_LOCAL | FI_MR_ENDPOINT;
-  hints->domain_attr->threading = FI_THREAD_SAFE;
+  
+  // Detect same-node multi-process scenario
+  int rank_me = get_rank_me();
+  int rank_n = get_rank_n();
+  bool is_multiprocess = rank_n > 1;
+  
+  // For CXI provider with multiple processes, FI_THREAD_SAFE may not be supported
+  // Try with less strict threading constraint for same-node multi-process
+  if (is_multiprocess && (prov_name_hint == nullptr || 
+                          std::string(prov_name_hint) == "cxi")) {
+    // Use FI_THREAD_DOMAIN instead of FI_THREAD_SAFE for multi-process
+    hints->domain_attr->threading = FI_THREAD_DOMAIN;
+    LCI_Log(LOG_INFO, "ofi", 
+            "Multi-process scenario detected (rank %d/%d). "
+            "Using FI_THREAD_DOMAIN for CXI provider compatibility\n",
+            rank_me, rank_n);
+  } else {
+    hints->domain_attr->threading = FI_THREAD_SAFE;
+  }
+  
   hints->domain_attr->control_progress = FI_PROGRESS_MANUAL;
   hints->domain_attr->data_progress = FI_PROGRESS_MANUAL;
-  hints->domain_attr->threading = FI_THREAD_SAFE;
   hints->tx_attr->inject_size = attr.max_inject_size;
   hints->caps = FI_RMA | FI_MSG;
 #if defined(LCI_USE_CUDA) || defined(LCI_USE_HIP)
@@ -94,17 +112,29 @@ ofi_net_context_impl_t::ofi_net_context_impl_t(runtime_t runtime_, attr_t attr_)
 #endif  // LCI_USE_CUDA || LCI_USE_HIP
 
   // Create ofi_info.
-  struct fi_info* all_infos;
-  int ret =
-      fi_getinfo(FI_VERSION(1, 6), nullptr, nullptr, 0, hints, &all_infos);
+  struct fi_info* all_infos = nullptr;
+  int ret = fi_getinfo(FI_VERSION(1, 6), nullptr, nullptr, 0, hints, &all_infos);
+  
+  // If fi_getinfo failed with multi-process scenario, try without threading constraint
+  if (ret && is_multiprocess && 
+      (prov_name_hint == nullptr || std::string(prov_name_hint) == "cxi")) {
+    // Try with no threading constraint (let provider decide)
+    if (hints->domain_attr->threading != FI_THREAD_UNSPEC) {
+      LCI_Log(LOG_INFO, "ofi",
+              "Initial fi_getinfo failed for multi-process. "
+              "Retrying with FI_THREAD_UNSPEC.\n");
+      hints->domain_attr->threading = FI_THREAD_UNSPEC;
+      ret = fi_getinfo(FI_VERSION(1, 6), nullptr, nullptr, 0, hints, &all_infos);
+    }
+  }
+  
   if (ret) {
     int err = ret < 0 ? -ret : ret;
     if (!attr.device_name.empty()) {
       LCI_Assert(false, "Cannot find OFI device/domain %s: %s\n",
                  attr.device_name.c_str(), fi_strerror(err));
     } else {
-      LCI_Assert(false, "err : %s (%s:%d)\n", fi_strerror(err), __FILE__,
-                 __LINE__);
+      LCI_Assert(false, "err : %s (%s:%d)\n", fi_strerror(err), __FILE__, __LINE__);
     }
   }
   // Get libfabric version.
@@ -219,9 +249,38 @@ ofi_device_impl_t::ofi_device_impl_t(net_context_t context_,
 {
   auto p_ofi_context = static_cast<ofi_net_context_impl_t*>(net_context.p_impl);
   ofi_domain_attr = p_ofi_context->ofi_info->domain_attr;
-  // Create domain.
-  FI_SAFECALL(fi_domain(p_ofi_context->ofi_fabric, p_ofi_context->ofi_info,
-                        &ofi_domain, nullptr));
+  
+  // Create domain with retry logic for multi-process scenarios
+  int err = fi_domain(p_ofi_context->ofi_fabric, p_ofi_context->ofi_info,
+                      &ofi_domain, nullptr);
+  
+  // If domain creation fails with ENOSYS (Function not implemented) in multi-process,
+  // try with less strict threading mode
+  if (err && get_rank_n() > 1 && 
+      p_ofi_context->ofi_info->domain_attr->threading == FI_THREAD_SAFE &&
+      strcmp(p_ofi_context->ofi_info->fabric_attr->prov_name, "cxi") == 0) {
+    LCI_Log(LOG_INFO, "ofi",
+            "fi_domain with FI_THREAD_SAFE failed for multi-process CXI. "
+            "Retrying with FI_THREAD_UNSPEC.\n");
+    // Modify the domain attributes for retry
+    struct fi_info* modified_info = fi_dupinfo(p_ofi_context->ofi_info);
+    modified_info->domain_attr->threading = FI_THREAD_UNSPEC;
+    err = fi_domain(p_ofi_context->ofi_fabric, modified_info,
+                    &ofi_domain, nullptr);
+    if (!err) {
+      // Update the stored domain_attr for consistency
+      ofi_domain_attr = modified_info->domain_attr;
+      LCI_Log(LOG_INFO, "ofi",
+              "fi_domain succeeded with FI_THREAD_UNSPEC.\n");
+    }
+    fi_freeinfo(modified_info);
+  }
+  
+  if (err < 0) err = -err;
+  if (err) {
+    LCI_Assert(false, "err : %s (%s:%d)\n", fi_strerror(err), __FILE__,
+               __LINE__);
+  }
 
   // Create end-point;
   if (p_ofi_context->ofi_info->tx_attr->size < attr.net_max_sends) {
