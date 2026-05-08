@@ -4,6 +4,7 @@
 #ifndef LCI_BACKEND_OFI_BACKEND_OFI_HPP
 #define LCI_BACKEND_OFI_BACKEND_OFI_HPP
 
+#include <mutex>
 #include <rdma/fabric.h>
 #include <rdma/fi_domain.h>
 #include <rdma/fi_endpoint.h>
@@ -81,6 +82,12 @@ class ofi_device_impl_t : public lci::device_impl_t
   LCIU_CACHE_PADDING(0);
   spinlock_t lock;
   LCIU_CACHE_PADDING(sizeof(spinlock_t));
+  // Serializes fi_mr_regattr/fi_mr_bind/fi_mr_enable/fi_close across threads.
+  // FI_THREAD_DOMAIN requires caller serialization; concurrent fi_mr_enable
+  // calls corrupt CXI's internal LE-append queue and cause cxip_mr_wait_append
+  // to spin forever. The main OFI trylock can't be reused here because
+  // fi_mr_enable may block for the NIC to confirm the LE append.
+  std::mutex mr_lock;
 };
 
 class ofi_endpoint_impl_t : public lci::endpoint_impl_t

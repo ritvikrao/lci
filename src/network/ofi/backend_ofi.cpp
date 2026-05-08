@@ -436,15 +436,13 @@ mr_t ofi_device_impl_t::register_memory_impl(void* buffer, size_t size)
 #endif  // LCI_USE_CUDA || LCI_USE_HIP
 
   struct fid_mr* ofi_mr;
-  FI_SAFECALL(fi_mr_regattr(ofi_domain, &mr_attr, 0, &ofi_mr));
-
-  // FI_SAFECALL(fi_mr_reg(
-  //     ofi_domain, buffer, size,
-  //     FI_SEND | FI_RECV | FI_READ | FI_WRITE | FI_REMOTE_WRITE |
-  //     FI_REMOTE_READ, 0, rdma_key, 0, &ofi_mr, 0));
-  if (ofi_domain_attr->mr_mode & FI_MR_ENDPOINT) {
-    FI_SAFECALL(fi_mr_bind(ofi_mr, &ofi_ep->fid, 0));
-    FI_SAFECALL(fi_mr_enable(ofi_mr));
+  {
+    std::lock_guard<std::mutex> guard(mr_lock);
+    FI_SAFECALL(fi_mr_regattr(ofi_domain, &mr_attr, 0, &ofi_mr));
+    if (ofi_domain_attr->mr_mode & FI_MR_ENDPOINT) {
+      FI_SAFECALL(fi_mr_bind(ofi_mr, &ofi_ep->fid, 0));
+      FI_SAFECALL(fi_mr_enable(ofi_mr));
+    }
   }
   static_cast<ofi_mr_impl_t*>(ret.p_impl)->ofi_mr = ofi_mr;
   return ret;
@@ -453,7 +451,10 @@ mr_t ofi_device_impl_t::register_memory_impl(void* buffer, size_t size)
 void ofi_device_impl_t::deregister_memory_impl(mr_impl_t* mr_impl)
 {
   auto p_ofi_mr = static_cast<ofi_mr_impl_t*>(mr_impl);
-  FI_SAFECALL(fi_close(&p_ofi_mr->ofi_mr->fid));
+  {
+    std::lock_guard<std::mutex> guard(mr_lock);
+    FI_SAFECALL(fi_close(&p_ofi_mr->ofi_mr->fid));
+  }
   delete p_ofi_mr;
 }
 
