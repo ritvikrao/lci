@@ -99,7 +99,21 @@ ofi_net_context_impl_t::ofi_net_context_impl_t(runtime_t runtime_, attr_t attr_)
   } else {
     hints->domain_attr->threading = FI_THREAD_SAFE;
   }
-  
+  // Allow override via LCI_OFI_THREADING_HINT env var (safe, domain, unspec).
+  const char* threading_hint_env = getenv("LCI_OFI_THREADING_HINT");
+  if (threading_hint_env != nullptr) {
+    std::string hint_str = threading_hint_env;
+    if (hint_str == "safe") {
+      hints->domain_attr->threading = FI_THREAD_SAFE;
+      LCI_Log(LOG_INFO, "ofi", "Using FI_THREAD_SAFE (from LCI_OFI_THREADING_HINT)\n");
+    } else if (hint_str == "domain") {
+      hints->domain_attr->threading = FI_THREAD_DOMAIN;
+      LCI_Log(LOG_INFO, "ofi", "Using FI_THREAD_DOMAIN (from LCI_OFI_THREADING_HINT)\n");
+    } else if (hint_str == "unspec") {
+      hints->domain_attr->threading = FI_THREAD_UNSPEC;
+      LCI_Log(LOG_INFO, "ofi", "Using FI_THREAD_UNSPEC (from LCI_OFI_THREADING_HINT)\n");
+    }
+  } else 
   hints->domain_attr->control_progress = FI_PROGRESS_MANUAL;
   hints->domain_attr->data_progress = FI_PROGRESS_MANUAL;
   hints->tx_attr->inject_size = attr.max_inject_size;
